@@ -51,7 +51,7 @@ async fn main() {
 
 async fn create_identifier(
     State(state): State<SharedUserState>,
-    Query(user): Query<User>,
+    Query(user): Query<CreateUser>,
 ) -> impl IntoResponse {
     let id = Uuid::new_v4();
     let user = user.username;
@@ -65,7 +65,7 @@ async fn create_identifier(
 
 async fn list_identifier(
     State(state): State<SharedUserState>,
-    Query(user): Query<UserId>,
+    Query(user): Query<ListUser>,
 ) -> impl IntoResponse {
     let uuid = Uuid::parse_str(&user.id);
 
@@ -75,27 +75,34 @@ async fn list_identifier(
         tracing::info!("Information provided about: {}", result.1);
 
         let found = User {
-            id: Some(result.0.to_string()),
-            username: result.1.clone(),
+            id: result.0.to_string(),
+            username: result.1.to_string(),
         };
         return (StatusCode::NOT_FOUND, Json(found));
     }
     (StatusCode::NOT_FOUND, Json(User::default()))
 }
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Serialize, Default)]
 struct User {
-    id: Option<String>,
+    id: String,
     username: String,
 }
+
 #[derive(Deserialize)]
-struct UserId {
+struct CreateUser {
+    username: String,
+}
+
+#[derive(Deserialize)]
+struct ListUser {
     id: String,
 }
-// store username -> id
-type SharedUserState = Arc<RwLock<UserState>>;
 
 #[derive(Default)]
 struct UserState {
     users: HashMap<Uuid, String>,
 }
+
+// store username -> id
+type SharedUserState = Arc<RwLock<UserState>>;
