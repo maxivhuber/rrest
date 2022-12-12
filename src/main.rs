@@ -6,10 +6,10 @@ use std::{
 };
 
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -37,7 +37,8 @@ async fn main() {
 
     // HTTP interface
     let app = Router::new()
-        .route("/", post(create_identifier).get(list_identifier))
+        .route("/identifiers", post(create_identifier))
+        .route("/identifiers/:uuid", get(get_identifier))
         .with_state(shared_users);
 
     // run it with hyper on localhost:3000
@@ -63,24 +64,26 @@ async fn create_identifier(
     (StatusCode::OK, Json(id.hyphenated().to_string()))
 }
 
-async fn list_identifier(
+async fn get_identifier(
     State(state): State<SharedUserState>,
-    Query(user): Query<ListUser>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let uuid = Uuid::parse_str(&user.id);
+    let uuid = Uuid::parse_str(&id);
+    let Ok(uuid) = uuid else {
+        return (StatusCode::NOT_FOUND, Json(User::default()))
+    };
 
-    if let Ok(uuid) = uuid {
-        let list = state.read().unwrap();
-        let result = list.users.get_key_value(&uuid).unwrap();
-        tracing::info!("Information provided about: {}", result.1);
+    let list = state.read().unwrap();
+    let result = list.users.get_key_value(&uuid).unwrap();
+    tracing::info!("Information provided about: {}", result.1);
 
-        let found = User {
+    (
+        StatusCode::FOUND,
+        Json(User {
             id: result.0.to_string(),
             username: result.1.to_string(),
-        };
-        return (StatusCode::NOT_FOUND, Json(found));
-    }
-    (StatusCode::NOT_FOUND, Json(User::default()))
+        }),
+    )
 }
 
 #[derive(Serialize, Default)]
@@ -92,11 +95,6 @@ struct User {
 #[derive(Deserialize)]
 struct CreateUser {
     username: String,
-}
-
-#[derive(Deserialize)]
-struct ListUser {
-    id: String,
 }
 
 #[derive(Default)]
