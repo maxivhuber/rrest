@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{Arc, RwLock},
+};
 
 use axum::{
     async_trait,
@@ -13,7 +17,6 @@ use axum::{
 use axum_macros::{debug_handler, FromRef};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use tokio::sync::RwLock;
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
@@ -74,7 +77,7 @@ async fn create_identifier(
     Query(username): Query<CreateUser>,
 ) -> impl IntoResponse {
     let id = Uuid::new_v4();
-    let mut usermap = user.0.write().await;
+    let mut usermap = user.0.write().unwrap();
 
     tracing::info!("{} assigned to {}", username.username, id);
     usermap.insert(id, username.username);
@@ -166,7 +169,7 @@ async fn verify_uuid(
         return Err((StatusCode::FORBIDDEN,"Please generate your identifier first"))
     };
 
-    let usermap = user.0.read().await;
+    let usermap = user.0.read().unwrap();
     usermap
         .get(&uuid)
         .ok_or((StatusCode::FORBIDDEN, "Invalid identifier!"))
