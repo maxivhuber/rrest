@@ -16,7 +16,7 @@ use axum::{
 };
 use axum_macros::{debug_handler, FromRef};
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use sqlx::{FromRow, SqlitePool};
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
@@ -42,9 +42,14 @@ async fn main() {
     };
     // HTTP interface
     let app = Router::new()
-        .route("/identifiers", post(create_identifier))
-        //.route("/identifiers/:uuid", get(get_identifier))
-        .route("/products", post(create_product))
+        .route("/identifiers", post(create_identifier).get(get_identifier))
+        .route(
+            "/products",
+            post(create_product)
+                .get(get_product)
+                .put(modify_product)
+                .delete(delete_product),
+        )
         .with_state(app_state);
 
     // run it with hyper on localhost:3000
@@ -71,7 +76,7 @@ async fn setup_sqlite(pool: &SqlitePool) {
     tracing::info!("Sqlite setup complete");
 }
 
-#[debug_handler(state=AppState)]
+#[debug_handler(state = AppState)]
 async fn create_identifier(
     State(user): State<Arc<SharedUser>>,
     Query(username): Query<CreateUser>,
@@ -85,12 +90,13 @@ async fn create_identifier(
     (StatusCode::OK, Json(id.hyphenated().to_string()))
 }
 
-#[debug_handler(state=AppState)]
+#[debug_handler(state = AppState)]
 async fn create_product(
-    id: UserID,
+    id: RequiredUserId,
     State(pool): State<Arc<SharedDB>>,
     Json(payload): Json<Product>,
 ) -> impl IntoResponse {
+    // check if product already exists
     sqlx::query(
         r#"
             INSERT INTO 
@@ -98,7 +104,7 @@ async fn create_product(
             VALUES (?1, ?2, ?3)
         "#,
     )
-    .bind(&id.0.hyphenated().to_string())
+    .bind(&id.0.to_string())
     .bind(&payload.name)
     .bind(&payload.description)
     .execute(&pool.0)
@@ -116,32 +122,92 @@ async fn create_product(
     )
 }
 
-// async fn get_identifier(
-//     State(state): State<SharedUserState>,
-//     Path(id): Path<String>,
-// ) -> impl IntoResponse {
-//     let uuid = Uuid::parse_str(&id);
-//     let Ok(uuid) = uuid else {
-//         return (StatusCode::NOT_FOUND, Json(User::default()))
-//     };
+#[debug_handler(state = AppState)]
+async fn get_identifier(
+    id: RequiredUserId,
+    State(user): State<Arc<SharedUser>>,
+) -> impl IntoResponse {
+    let list = user.0.read().unwrap();
+    let result = list.get_key_value(&id.0).unwrap();
+    tracing::info!("Information provided about: {}", result.1);
 
-//     let list = state.read().unwrap();
-//     let result = list.users.get_key_value(&uuid).unwrap();
-//     tracing::info!("Information provided about: {}", result.1);
+    (
+        StatusCode::FOUND,
+        Json(User {
+            id: result.0.to_string(),
+            username: result.1.to_owned(),
+        }),
+    )
+}
 
-//     (
-//         StatusCode::FOUND,
-//         Json(User {
-//             id: result.0.to_string(),
-//             username: result.1.to_string(),
-//         }),
-//     )
-// }
+#[debug_handler(state = AppState)]
+async fn get_product(id: RequiredUserId, State(pool): State<Arc<SharedDB>>) -> impl IntoResponse {
+    let product =
+        sqlx::query_as::<_, Product>("SELECT name, description FROM product WHERE owner = ?1")
+            .bind(id.0.to_string())
+            .fetch_one(&pool.0)
+            .await;
+    let Ok(product) = product else {
+        return (StatusCode::NOT_FOUND, Json(Product::default()))
+    };
+    (StatusCode::FOUND, Json(product))
+}
 
-struct UserID(Uuid);
+#[debug_handler(state = AppState)]
+async fn delete_product(
+    id: RequiredUserId,
+    State(pool): State<Arc<SharedDB>>,
+) -> impl IntoResponse {
+    let product = sqlx::query("DELETE FROM product WHERE owner = ?1")
+        .bind(id.0.to_string())
+        .execute(&pool.0)
+        .await
+        .unwrap();
+
+    let true = product.rows_affected() == 1 else {
+        return StatusCode::NOT_FOUND;
+    };
+    StatusCode::NO_CONTENT
+}
+
+#[debug_handler(state = AppState)]
+async fn modify_product(
+    id: RequiredUserId,
+    State(pool): State<Arc<SharedDB>>,
+    Json(payload): Json<ModifyProduct>,
+) -> impl IntoResponse {
+    let product =
+        sqlx::query_as::<_, Product>("SELECT name, description FROM product WHERE owner = ?1")
+            .bind(id.0.to_string())
+            .fetch_one(&pool.0)
+            .await;
+    let Ok(product) = product else {
+        return StatusCode::NOT_FOUND
+    };
+
+    let new_name = payload.name.unwrap_or(product.name);
+    let new_description = payload.description.unwrap_or(product.description);
+
+    let product = sqlx::query("UPDATE product SET name = ?1, description = ?2 WHERE owner = ?3")
+        .bind(new_name)
+        .bind(new_description)
+        .bind(id.0.to_string())
+        .execute(&pool.0)
+        .await
+        .unwrap();
+
+    let true = product.rows_affected() == 1 else {
+        // this should never happen; INSERT error
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    };
+
+    StatusCode::NO_CONTENT
+}
+
+struct RequiredUserId(Uuid);
 
 #[async_trait]
-impl<S> FromRequestParts<S> for UserID
+impl<S> FromRequestParts<S> for RequiredUserId
 where
     Arc<SharedUser>: FromRef<S>,
     S: Send + Sync,
@@ -164,23 +230,30 @@ where
 async fn verify_uuid(
     uuid: &str,
     user: Arc<SharedUser>,
-) -> Result<UserID, (StatusCode, &'static str)> {
+) -> Result<RequiredUserId, (StatusCode, &'static str)> {
     let Ok(uuid) = Uuid::parse_str(uuid) else {
-        return Err((StatusCode::FORBIDDEN,"Please generate your identifier first"))
+        return Err((StatusCode::FORBIDDEN,"Invalid identifier"))
     };
 
     let usermap = user.0.read().unwrap();
     usermap
         .get(&uuid)
         .ok_or((StatusCode::FORBIDDEN, "Invalid identifier!"))
-        .map(|_| UserID(uuid))
+        .map(|_| RequiredUserId(uuid))
 }
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize, Default, FromRow)]
 struct Product {
     name: String,
     description: String,
 }
+
+#[derive(Deserialize)]
+struct ModifyProduct {
+    name: Option<String>,
+    description: Option<String>,
+}
+
 #[derive(Serialize, Default)]
 struct User {
     id: String,
